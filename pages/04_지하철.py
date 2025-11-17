@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
+from io import StringIO
 
 st.set_page_config(page_title="지하철 TOP10 역 (승+하)", layout="wide")
 
@@ -22,22 +23,19 @@ def load_local_or_uploaded(path="/mnt/data/subway.csv"):
 def load_uploaded_file(uploaded_file):
     if uploaded_file is None:
         return None
-    # try to read with common encodings by decoding bytes
+
     try:
         df = pd.read_csv(uploaded_file)
         return df
     except Exception:
-        # try cp949 by reading bytes then decode
         try:
             uploaded_file.seek(0)
             text = uploaded_file.read().decode("cp949")
-            from io import StringIO
             df = pd.read_csv(StringIO(text))
             return df
         except Exception:
             uploaded_file.seek(0)
             text = uploaded_file.read().decode("utf-8", errors="replace")
-            from io import StringIO
             df = pd.read_csv(StringIO(text))
             return df
 
@@ -47,7 +45,7 @@ st.title("🗺️ 지하철 역 Top 10 (선택 날짜·호선) — Plotly Intera
 df = load_local_or_uploaded()
 
 if df is None:
-    st.info("내장 데이터 파일을 찾을 수 없습니다. CSV 파일을 업로드해주세요. (예: subway.csv)")
+    st.info("내장 데이터 파일 없음 → CSV 파일을 업로드해주세요. (예: subway.csv)")
     uploaded = st.file_uploader("CSV 파일 업로드", type=["csv"])
     if uploaded:
         df = load_uploaded_file(uploaded)
@@ -57,38 +55,41 @@ else:
 if df is None:
     st.stop()
 
-# 표준화: 컬럼명 확인 및 간단 정리 (한글 컬럼명 가정)
-# 기대 컬럼: 사용일자, 호선명, 역명, 승차총승객수, 하차총승객수
+# 표준화: 필요한 컬럼 확인
 expected_cols = ["사용일자", "호선명", "역명", "승차총승객수", "하차총승객수"]
 missing = [c for c in expected_cols if c not in df.columns]
 if missing:
-    st.error(f"데이터에 필요한 컬럼이 없습니다: {missing}. CSV 컬럼명을 확인해주세요.")
-    st.write("현재 컬럼:", df.columns.tolist())
+    st.error(f"데이터에 필요한 컬럼이 없습니다: {missing}")
+    st.write("현재 CSV 컬럼:", df.columns.tolist())
     st.stop()
 
-# 사용일자 형태 정리: 숫자(yyyymmdd) -> 날짜타입
+# 사용일자 -> datetime 변환
 try:
     df["사용일자"] = pd.to_datetime(df["사용일자"].astype(str), format="%Y%m%d")
 except Exception:
-    # try more flexible parse
     df["사용일자"] = pd.to_datetime(df["사용일자"], errors="coerce")
 
-# 필터할 날짜 목록: 2025-10 (요구사항: 2025년 10월 중 하루)
-available_oct_dates = sorted(df.loc[
-    (df["사용일자"].dt.year == 2025) & (df["사용일자"].dt.month == 10),
-    "사용일자"
-].dt.date.unique())
+# 2025년 10월 날짜만 필터
+available_oct_dates = sorted(
+    df.loc[
+        (df["사용일자"].dt.year == 2025) & (df["사용일자"].dt.month == 10),
+        "사용일자"
+    ].dt.date.unique()
+)
 
 if len(available_oct_dates) == 0:
-    st.error("데이터에 2025년 10월 날짜가 없습니다. 다른 데이터 파일을 확인해주세요.")
+    st.error("데이터에 2025년 10월 날짜가 없습니다.")
     st.stop()
 
-col1, col2 = st.columns([1,2])
+col1, col2 = st.columns([1, 2])
 with col1:
-    sel_date = st.selectbox("🔹 날짜 선택 (2025년 10월)", options=available_oct_dates, index=0,
-                            format_func=lambda d: d.strftime("%Y-%m-%d"))
+    sel_date = st.selectbox(
+        "🔹 날짜 선택 (2025년 10월)",
+        options=available_oct_dates,
+        format_func=lambda d: d.strftime("%Y-%m-%d")
+    )
+
 with col2:
-    # 호선 선택 (df 호선명 유니크)
     lines = sorted(df["호선명"].astype(str).unique())
     sel_line = st.selectbox("🔹 호선 선택", options=lines)
 
@@ -99,13 +100,16 @@ filtered = df[
 ].copy()
 
 if filtered.empty:
-    st.warning("선택한 날짜와 호선에 해당하는 데이터가 없습니다.")
+    st.warning("선택한 날짜 + 호선에 데이터가 없습니다.")
     st.stop()
 
-# 합계 컬럼 생성
-filtered["총승객수"] = filtered["승차총승객수"].fillna(0) + filtered["하차총승객수"].fillna(0)
+# 총 승객수 생성
+filtered["총승객수"] = (
+    filtered["승차총승객수"].fillna(0) +
+    filtered["하차총승객수"].fillna(0)
+)
 
-# 역별 합계(혹시 같은 역이 여러 행이면 합쳐줌)
+# 역별 합계
 grouped = (
     filtered.groupby("역명", as_index=False)["총승객수"]
     .sum()
@@ -115,19 +119,14 @@ grouped = (
 top10 = grouped.head(10).copy()
 top10.reset_index(drop=True, inplace=True)
 
-# 색상: 1등은 빨간색, 나머지는 파란색에서 흐려지는 그라데이션
+# 색상 생성 함수 (1등 빨강, 나머지 파랑 그라데이션)
 def make_colors(n):
-    """
-    n expected 10. first red, rest blue gradient with decreasing alpha.
-    """
     colors = []
     if n >= 1:
-        colors.append("rgba(230,0,0,1)")  # vivid red
-    base_rgb = (0, 102, 204)  # blue
-    # create n-1 shades with decreasing opacity
-    rest = max(n - 1, 0)
+        colors.append("rgba(230,0,0,1)")  # red
+    base_rgb = (0, 102, 204)
+    rest = n - 1
     for i in range(rest):
-        # alpha linearly from 1.0 down to 0.25
         alpha = 1.0 - (i * (0.75 / max(rest - 1, 1))) if rest > 1 else 0.6
         r, g, b = base_rgb
         colors.append(f"rgba({r},{g},{b},{alpha:.2f})")
@@ -135,7 +134,7 @@ def make_colors(n):
 
 colors = make_colors(len(top10))
 
-# Plotly bar
+# Plotly 그래프
 fig = px.bar(
     top10,
     x="총승객수",
@@ -143,16 +142,17 @@ fig = px.bar(
     orientation="h",
     text="총승객수",
     labels={"총승객수": "총 승·하차 승객수", "역명": "역명"},
-    title=f"{sel_date.strftime('%Y-%m-%d')} — {sel_line} 호선: 승차+하차 기준 Top 10 역"
+    title=f"{sel_date.strftime('%Y-%m-%d')} — {sel_line} 호선 Top 10 역"
 )
 
-# ensure bars sorted top->bottom (largest on top)
 fig.update_yaxes(autorange="reversed")
 
-# apply custom colors per bar
-fig.update_traces(marker_color=colors, textposition="outside", hovertemplate="%{y}<br>총승객수: %{x:,}")
+fig.update_traces(
+    marker_color=colors,
+    textposition="outside",
+    hovertemplate="%{y}<br>총승객수: %{x:,}"
+)
 
-# layout tweaks
 fig.update_layout(
     margin=dict(l=160, r=40, t=80, b=40),
     xaxis_tickformat=",",
@@ -161,9 +161,8 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 하단: top10 테이블 제공
-st.subheader("🔎 Top 10 상세 표")
+st.subheader("🔎 Top 10 상세 데이터")
 st.dataframe(top10.style.format({"총승객수": "{:,}"}), height=300)
 
 st.markdown("---")
-st.caption("개발자 노트: CSV 인코딩이 cp949(Windows-949)로 되어 있는 경우가 많아 해당 인코딩 우선으로 읽습니다.")
+st.caption("개발자 노트: CSV 인코딩은 cp949가 기본이며, utf-8도 자동 처리됩니다.")
