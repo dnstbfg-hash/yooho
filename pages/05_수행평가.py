@@ -4,13 +4,12 @@ import numpy as np
 import plotly.express as px
 from io import StringIO
 
-# 1. 데이터 로드 및 전처리 함수 (수정됨: header=2)
+# 1. 데이터 로드 및 전처리 함수
 @st.cache_data
 def load_and_preprocess_data(file_content):
     """주어진 텍스트 파일 내용을 Pandas DataFrame으로 로드하고 전처리합니다."""
-    # 데이터 로드 (메모리 내 파일 내용 사용)
-    # 탭(	)으로 구분된 데이터를 로드하고, 실제 헤더는 3번째 줄(인덱스 2)을 사용하도록 수정
-    df = pd.read_csv(StringIO(file_content), sep='\t', header=2) # 👈 이 부분을 header=2로 수정
+    # 탭(	)으로 구분된 데이터를 로드하고, 실제 헤더는 3번째 줄(인덱스 2)을 사용
+    df = pd.read_csv(StringIO(file_content), sep='\t', header=2)
     
     # 필요한 열 선택 및 이름 변경
     columns_map = {
@@ -325,7 +324,7 @@ def app():
 합계	관악구	신림8동	10	4	-	-	-	-	2	-	-	3	-	1
 합계	관악구	신림9동	24	3	-	-	-	-	10	-	-	8	-	3
 합계	관악구	신림10동	7	1	-	-	-	-	5	-	-	1	-	-
-합계	관악구	신림12동	12	1	-	-	-	-	7	-	아무튼:4	-	-
+합계	관악구	신림12동	12	1	-	-	-	-	7	-	-	4	-	-
 합계	서초구	소계	363	97	25	-	2	9	157	-	3	31	1	38
 합계	강남구	소계	265	89	10	2	-	6	106	-	9	18	-	25
 합계	송파구	소계	446	111	19	3	2	3	239	1	2	56	-	10
@@ -335,7 +334,6 @@ def app():
     try:
         df_borough = load_and_preprocess_data(file_content)
     except Exception as e:
-        # 오류 발생 시 사용자에게 다시 알림
         st.error(f"데이터 로드 및 전처리 중 오류가 발생했습니다: {e}")
         return
 
@@ -355,11 +353,25 @@ def app():
         st.markdown(f"* **최다 발생 구:** **{df_sorted.iloc[0]['구']}** ({df_sorted.iloc[0]['총 화재 건수']}건)")
         st.markdown(f"* **최소 발생 구:** **{df_sorted.iloc[-1]['구']}** ({df_sorted.iloc[-1]['총 화재 건수']}건)")
 
-        # 전체 서울시 화재 현황 (원본 데이터의 첫 번째 '소계' 행에서 추출)
-        # file_content에서 전체 합계 행을 다시 로드하여 사용
-        df_total = pd.read_csv(StringIO(file_content), sep='\t', header=2).iloc[1] # 👈 header=2로 변경 후, 전체 소계 행은 인덱스 1에 위치
-        st.markdown(f"**서울시 전체 총 화재 건수:** **{df_total['소계']}건**")
-        st.markdown(f"**서울시 전체 부주의 화재:** **{df_total['부주의']}건** (약 {(df_total['부주의'] / df_total['소계'] * 100):.2f}%)")
+        # 전체 서울시 화재 현황 로직 수정
+        # 1. header=2로 원본 데이터 로드
+        df_raw = pd.read_csv(StringIO(file_content), sep='\t', header=2)
+        # 2. 전체 합계 행은 iloc[0]에 위치함
+        df_total = df_raw.iloc[0]
+        
+        # 3. 계산을 위해 문자열을 숫자로 변환 (TypeError 방지)
+        total_so_gye = pd.to_numeric(df_total['소계'], errors='coerce')
+        total_bu_ju_eui = pd.to_numeric(df_total['부주의'], errors='coerce')
+        
+        # 4. 비율 계산 (NaN 값 처리 포함)
+        if total_so_gye > 0:
+            percentage = (total_bu_ju_eui / total_so_gye * 100)
+        else:
+            percentage = 0.0
+
+        st.markdown(f"**서울시 전체 총 화재 건수:** **{int(total_so_gye)}건**")
+        # 수정된 계산을 사용
+        st.markdown(f"**서울시 전체 부주의 화재:** **{int(total_bu_ju_eui)}건** (약 {percentage:.2f}%)")
 
     
     with col2:
@@ -383,6 +395,7 @@ def app():
     df_cause_sorted = df_borough.sort_values(by=selected_cause, ascending=False)
     
     # 비율 계산 및 추가
+    # 0으로 나누는 오류 방지를 위해 replace([np.inf, -np.inf], np.nan).fillna(0) 적용
     df_cause_sorted['비율 (%)'] = (df_cause_sorted[selected_cause] / df_cause_sorted['총 화재 건수'] * 100).replace([np.inf, -np.inf], np.nan).fillna(0).round(2)
     
     col3, col4 = st.columns([1, 2])
